@@ -1,14 +1,85 @@
 const axios = require('axios');
+
 const TMDB_BASE_URL = 'https://api.themoviedb.org';
-
-// 创建缓存对象
-const cache = new Map();
-// 缓存过期时间（10分钟）
 const CACHE_DURATION = 10 * 60 * 1000;
-// 最大缓存条目数
 const MAX_CACHE_SIZE = 1000;
+const MAX_CALL_LOGS = 500;
+const STATS_TIME_ZONE = process.env.STATS_TIME_ZONE || 'Asia/Shanghai';
 
-// 缓存清理函数
+const cache = new Map();
+const dailyStats = new Map();
+
+function getTodayKey() {
+    return new Intl.DateTimeFormat('en-CA', {
+        timeZone: STATS_TIME_ZONE,
+        year: 'numeric',
+        month: '2-digit',
+        day: '2-digit'
+    }).format(new Date());
+}
+
+function getOrCreateTodayStats() {
+    const today = getTodayKey();
+
+    for (const key of dailyStats.keys()) {
+        if (key !== today) {
+            dailyStats.delete(key);
+        }
+    }
+
+    if (!dailyStats.has(today)) {
+        dailyStats.set(today, {
+            date: today,
+            timeZone: STATS_TIME_ZONE,
+            total: 0,
+            byPath: new Map(),
+            calls: []
+        });
+    }
+
+    return dailyStats.get(today);
+}
+
+function recordApiCall(entry) {
+    const stats = getOrCreateTodayStats();
+    const pathStats = stats.byPath.get(entry.path) || {
+        path: entry.path,
+        count: 0,
+        lastStatus: null,
+        lastCalledAt: null
+    };
+
+    stats.total += 1;
+    pathStats.count += 1;
+    pathStats.lastStatus = entry.status;
+    pathStats.lastCalledAt = entry.calledAt;
+    stats.byPath.set(entry.path, pathStats);
+
+    stats.calls.unshift(entry);
+    if (stats.calls.length > MAX_CALL_LOGS) {
+        stats.calls.length = MAX_CALL_LOGS;
+    }
+}
+
+function getStatsPayload() {
+    const stats = getOrCreateTodayStats();
+
+    return {
+        date: stats.date,
+        timeZone: stats.timeZone,
+        total: stats.total,
+        retainedLogs: stats.calls.length,
+        maxLogs: MAX_CALL_LOGS,
+        byPath: Array.from(stats.byPath.values())
+            .sort((a, b) => b.count - a.count || a.path.localeCompare(b.path)),
+        calls: stats.calls
+    };
+}
+
+function isAdminRoute(pathname) {
+    return pathname === '/admin' || pathname === '/admin/data';
+}
+
 function cleanExpiredCache() {
     const now = Date.now();
     for (const [key, value] of cache.entries()) {
@@ -18,14 +89,11 @@ function cleanExpiredCache() {
     }
 }
 
-// 检查缓存大小并清理最旧的条目
 function checkCacheSize() {
     if (cache.size > MAX_CACHE_SIZE) {
-        // 将缓存条目转换为数组并按过期时间排序
         const entries = Array.from(cache.entries());
         entries.sort((a, b) => a[1].expiry - b[1].expiry);
 
-        // 删除最旧的条目，直到缓存大小达到限制
         const deleteCount = cache.size - MAX_CACHE_SIZE;
         entries.slice(0, deleteCount).forEach(([key]) => cache.delete(key));
 
@@ -33,58 +101,268 @@ function checkCacheSize() {
     }
 }
 
-// 定期清理缓存（每10分钟）
+function sendAdminPage(res) {
+    res.setHeader('Content-Type', 'text/html; charset=utf-8');
+    res.status(200).send(`<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>TMDB Proxy Admin</title>
+  <style>
+    :root {
+      color-scheme: light;
+      font-family: Inter, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      background: #f7f8fa;
+      color: #17202a;
+    }
+    * { box-sizing: border-box; }
+    body { margin: 0; min-height: 100vh; }
+    header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 16px;
+      padding: 24px clamp(16px, 4vw, 48px);
+      border-bottom: 1px solid #e4e8ee;
+      background: #ffffff;
+    }
+    h1 { margin: 0; font-size: clamp(22px, 3vw, 32px); font-weight: 700; }
+    main { padding: 24px clamp(16px, 4vw, 48px) 48px; }
+    .meta { color: #657385; margin-top: 6px; font-size: 14px; }
+    .toolbar { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+    button {
+      min-height: 36px;
+      border: 1px solid #c9d2de;
+      border-radius: 6px;
+      background: #ffffff;
+      color: #17202a;
+      padding: 0 14px;
+      cursor: pointer;
+      font-weight: 600;
+    }
+    button:hover { background: #f1f4f8; }
+    .summary {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+      gap: 12px;
+      margin-bottom: 22px;
+    }
+    .metric {
+      border: 1px solid #e1e6ed;
+      border-radius: 8px;
+      background: #ffffff;
+      padding: 16px;
+    }
+    .metric span { display: block; color: #657385; font-size: 13px; }
+    .metric strong { display: block; margin-top: 8px; font-size: 28px; }
+    section { margin-top: 22px; }
+    h2 { margin: 0 0 12px; font-size: 18px; }
+    .table-wrap {
+      overflow-x: auto;
+      border: 1px solid #e1e6ed;
+      border-radius: 8px;
+      background: #ffffff;
+    }
+    table { width: 100%; border-collapse: collapse; min-width: 760px; }
+    th, td { padding: 11px 12px; border-bottom: 1px solid #edf0f4; text-align: left; vertical-align: top; }
+    th { color: #4a5868; font-size: 13px; background: #fafbfc; }
+    td { font-size: 14px; }
+    tr:last-child td { border-bottom: 0; }
+    code {
+      overflow-wrap: anywhere;
+      word-break: break-word;
+      font-family: "SFMono-Regular", Consolas, monospace;
+      font-size: 13px;
+      color: #243447;
+    }
+    .badge {
+      display: inline-flex;
+      align-items: center;
+      min-height: 24px;
+      border-radius: 999px;
+      padding: 0 8px;
+      font-size: 12px;
+      font-weight: 700;
+      background: #edf6ee;
+      color: #1d6b33;
+    }
+    .badge.miss { background: #fff3dc; color: #8a5700; }
+    .empty { padding: 24px; color: #657385; }
+    @media (max-width: 640px) {
+      header { align-items: flex-start; flex-direction: column; }
+      table { min-width: 680px; }
+    }
+  </style>
+</head>
+<body>
+  <header>
+    <div>
+      <h1>TMDB Proxy Admin</h1>
+      <div class="meta" id="meta">加载中...</div>
+    </div>
+    <div class="toolbar">
+      <button type="button" id="refresh">刷新</button>
+    </div>
+  </header>
+  <main>
+    <div class="summary">
+      <div class="metric"><span>今日调用次数</span><strong id="total">0</strong></div>
+      <div class="metric"><span>不同 API 路径</span><strong id="paths">0</strong></div>
+      <div class="metric"><span>保留调用内容</span><strong id="logs">0</strong></div>
+    </div>
+
+    <section>
+      <h2>API 路径统计</h2>
+      <div class="table-wrap" id="pathTable"></div>
+    </section>
+
+    <section>
+      <h2>调用内容</h2>
+      <div class="table-wrap" id="callTable"></div>
+    </section>
+  </main>
+
+  <script>
+    const text = (value) => String(value ?? '');
+    const escapeHtml = (value) => text(value).replace(/[&<>"']/g, (char) => ({
+      '&': '&amp;',
+      '<': '&lt;',
+      '>': '&gt;',
+      '"': '&quot;',
+      "'": '&#39;'
+    }[char]));
+
+    function renderTable(container, headers, rows, emptyText) {
+      if (!rows.length) {
+        container.innerHTML = '<div class="empty">' + escapeHtml(emptyText) + '</div>';
+        return;
+      }
+
+      container.innerHTML =
+        '<table><thead><tr>' +
+        headers.map((header) => '<th>' + escapeHtml(header) + '</th>').join('') +
+        '</tr></thead><tbody>' +
+        rows.join('') +
+        '</tbody></table>';
+    }
+
+    async function loadStats() {
+      const response = await fetch('/admin/data', { cache: 'no-store' });
+      const data = await response.json();
+
+      document.getElementById('meta').textContent =
+        '日期 ' + data.date + ' · 时区 ' + data.timeZone + ' · 最多保留最近 ' + data.maxLogs + ' 条调用内容';
+      document.getElementById('total').textContent = data.total;
+      document.getElementById('paths').textContent = data.byPath.length;
+      document.getElementById('logs').textContent = data.retainedLogs;
+
+      renderTable(
+        document.getElementById('pathTable'),
+        ['路径', '次数', '最后状态', '最后调用时间'],
+        data.byPath.map((item) =>
+          '<tr><td><code>' + escapeHtml(item.path) + '</code></td><td>' + item.count +
+          '</td><td>' + escapeHtml(item.lastStatus) + '</td><td>' + escapeHtml(item.lastCalledAt) + '</td></tr>'
+        ),
+        '今天还没有 API 调用。'
+      );
+
+      renderTable(
+        document.getElementById('callTable'),
+        ['时间', '方法', '路径', '状态', '缓存', '耗时'],
+        data.calls.map((item) =>
+          '<tr><td>' + escapeHtml(item.calledAt) + '</td><td>' + escapeHtml(item.method) +
+          '</td><td><code>' + escapeHtml(item.path) + '</code></td><td>' + escapeHtml(item.status) +
+          '</td><td><span class="badge ' + (item.cacheHit ? '' : 'miss') + '">' +
+          (item.cacheHit ? 'HIT' : 'MISS') + '</span></td><td>' + escapeHtml(item.durationMs) + ' ms</td></tr>'
+        ),
+        '今天还没有调用内容。'
+      );
+    }
+
+    document.getElementById('refresh').addEventListener('click', loadStats);
+    loadStats().catch((error) => {
+      document.getElementById('meta').textContent = '加载失败：' + error.message;
+    });
+  </script>
+</body>
+</html>`);
+}
+
 setInterval(cleanExpiredCache, CACHE_DURATION);
 
 module.exports = async (req, res) => {
-    // 设置 CORS 头
     res.setHeader('Access-Control-Allow-Origin', '*');
     res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
     res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
 
-    // 处理 OPTIONS 请求
     if (req.method === 'OPTIONS') {
         res.status(200).end();
         return;
     }
 
-    try {
-        const fullPath = req.url;
-        const authHeader = req.headers.authorization;
+    const fullPath = req.url;
+    const pathname = fullPath.split('?')[0];
 
-        // 缓存键只使用请求路径
+    if (isAdminRoute(pathname)) {
+        if (req.method === 'GET' && pathname === '/admin') {
+            sendAdminPage(res);
+            return;
+        }
+
+        if (req.method === 'GET' && pathname === '/admin/data') {
+            res.setHeader('Cache-Control', 'no-store');
+            res.status(200).json(getStatsPayload());
+            return;
+        }
+
+        res.status(405).json({
+            error: 'Method not allowed'
+        });
+        return;
+    }
+
+    const startedAt = Date.now();
+    let statusCode = 500;
+    let cacheHit = false;
+
+    try {
+        const authHeader = req.headers.authorization;
         const cacheKey = fullPath;
 
-        // 检查缓存
         if (cache.has(cacheKey)) {
             const cachedData = cache.get(cacheKey);
             if (Date.now() < cachedData.expiry) {
+                statusCode = 200;
+                cacheHit = true;
                 console.log('Cache hit:', fullPath);
+                recordApiCall({
+                    calledAt: new Date().toISOString(),
+                    method: req.method,
+                    path: fullPath,
+                    status: statusCode,
+                    cacheHit,
+                    durationMs: Date.now() - startedAt
+                });
                 return res.status(200).json(cachedData.data);
-            } else {
-                cache.delete(cacheKey);
             }
+
+            cache.delete(cacheKey);
         }
 
-        // 构建 TMDB 请求 URL
         const tmdbUrl = `${TMDB_BASE_URL}${fullPath}`;
-
-        // 构建请求配置
         const config = {};
 
-        // 只有在存在 Authorization header 时才添加
         if (authHeader) {
             config.headers = {
-                'Authorization': authHeader
+                Authorization: authHeader
             };
         }
 
-        // 发送请求到 TMDB
         const response = await axios.get(tmdbUrl, config);
+        statusCode = response.status;
 
-        // 只有响应状态码为 200 时才缓存
         if (response.status === 200) {
-            // 在添加新缓存前检查缓存大小
             checkCacheSize();
 
             cache.set(cacheKey, {
@@ -96,13 +374,33 @@ module.exports = async (req, res) => {
             console.log('Response not cached due to non-200 status:', response.status);
         }
 
-        // 返回响应
+        recordApiCall({
+            calledAt: new Date().toISOString(),
+            method: req.method,
+            path: fullPath,
+            status: statusCode,
+            cacheHit,
+            durationMs: Date.now() - startedAt
+        });
+
         res.status(response.status).json(response.data);
     } catch (error) {
+        statusCode = error.response?.status || 500;
         console.error('TMDB API error:', error);
-        res.status(error.response?.status || 500).json({
+
+        recordApiCall({
+            calledAt: new Date().toISOString(),
+            method: req.method,
+            path: fullPath,
+            status: statusCode,
+            cacheHit,
+            durationMs: Date.now() - startedAt,
+            error: error.message
+        });
+
+        res.status(statusCode).json({
             error: error.message,
             details: error.response?.data
         });
     }
-}; 
+};
