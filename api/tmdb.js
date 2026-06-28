@@ -5,6 +5,8 @@ const CACHE_DURATION = 10 * 60 * 1000;
 const MAX_CACHE_SIZE = 1000;
 const MAX_CALL_LOGS = 500;
 const STATS_TIME_ZONE = process.env.STATS_TIME_ZONE || 'Asia/Shanghai';
+const ADMIN_USER = process.env.ADMIN_USER || 'admin';
+const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || '';
 
 const cache = new Map();
 const dailyStats = new Map();
@@ -78,6 +80,54 @@ function getStatsPayload() {
 
 function isAdminRoute(pathname) {
     return pathname === '/admin' || pathname === '/admin/data';
+}
+
+function isIgnoredRoute(pathname) {
+    return pathname === '/favicon.ico';
+}
+
+function timingSafeEqualString(left, right) {
+    const leftBuffer = Buffer.from(left);
+    const rightBuffer = Buffer.from(right);
+
+    if (leftBuffer.length !== rightBuffer.length) {
+        return false;
+    }
+
+    return require('crypto').timingSafeEqual(leftBuffer, rightBuffer);
+}
+
+function isAdminAuthorized(req) {
+    if (!ADMIN_PASSWORD) {
+        return true;
+    }
+
+    const authHeader = req.headers.authorization || '';
+    const [scheme, credentials] = authHeader.split(' ');
+
+    if (scheme !== 'Basic' || !credentials) {
+        return false;
+    }
+
+    const decoded = Buffer.from(credentials, 'base64').toString('utf8');
+    const separatorIndex = decoded.indexOf(':');
+
+    if (separatorIndex === -1) {
+        return false;
+    }
+
+    const username = decoded.slice(0, separatorIndex);
+    const password = decoded.slice(separatorIndex + 1);
+
+    return timingSafeEqualString(username, ADMIN_USER) &&
+        timingSafeEqualString(password, ADMIN_PASSWORD);
+}
+
+function requestAdminAuth(res) {
+    res.setHeader('WWW-Authenticate', 'Basic realm="TMDB Proxy Admin", charset="UTF-8"');
+    res.status(401).json({
+        error: 'Unauthorized'
+    });
 }
 
 function cleanExpiredCache() {
@@ -305,6 +355,11 @@ module.exports = async (req, res) => {
     const pathname = fullPath.split('?')[0];
 
     if (isAdminRoute(pathname)) {
+        if (!isAdminAuthorized(req)) {
+            requestAdminAuth(res);
+            return;
+        }
+
         if (req.method === 'GET' && pathname === '/admin') {
             sendAdminPage(res);
             return;
@@ -319,6 +374,11 @@ module.exports = async (req, res) => {
         res.status(405).json({
             error: 'Method not allowed'
         });
+        return;
+    }
+
+    if (isIgnoredRoute(pathname)) {
+        res.status(204).end();
         return;
     }
 
