@@ -282,6 +282,13 @@ function sendAdminPage(res) {
       '"': '&quot;',
       "'": '&#39;'
     }[char]));
+    const readablePath = (value) => {
+      try {
+        return decodeURIComponent(text(value));
+      } catch {
+        return text(value);
+      }
+    };
 
     function renderTable(container, headers, rows, emptyText) {
       if (!rows.length) {
@@ -311,7 +318,7 @@ function sendAdminPage(res) {
         document.getElementById('pathTable'),
         ['路径', '次数', '最后状态', '最后调用时间'],
         data.byPath.map((item) =>
-          '<tr><td><code>' + escapeHtml(item.path) + '</code></td><td>' + item.count +
+          '<tr><td><code title="' + escapeHtml(item.path) + '">' + escapeHtml(readablePath(item.path)) + '</code></td><td>' + item.count +
           '</td><td>' + escapeHtml(item.lastStatus) + '</td><td>' + escapeHtml(item.lastCalledAt) + '</td></tr>'
         ),
         '今天还没有 API 调用。'
@@ -322,7 +329,7 @@ function sendAdminPage(res) {
         ['时间', '方法', '路径', '状态', '缓存', '耗时'],
         data.calls.map((item) =>
           '<tr><td>' + escapeHtml(item.calledAt) + '</td><td>' + escapeHtml(item.method) +
-          '</td><td><code>' + escapeHtml(item.path) + '</code></td><td>' + escapeHtml(item.status) +
+          '</td><td><code title="' + escapeHtml(item.path) + '">' + escapeHtml(readablePath(item.path)) + '</code></td><td>' + escapeHtml(item.status) +
           '</td><td><span class="badge ' + (item.cacheHit ? '' : 'miss') + '">' +
           (item.cacheHit ? 'HIT' : 'MISS') + '</span></td><td>' + escapeHtml(item.durationMs) + ' ms</td></tr>'
         ),
