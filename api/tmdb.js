@@ -158,7 +158,7 @@ function clearMemoryStats() {
 
 async function clearKvStats() {
     await kvPipeline([
-        ['DEL', ...Object.values(getStatsKeys(getTodayKey()))]
+        ...Object.values(getStatsKeys(getTodayKey())).map((key) => ['DEL', key])
     ]);
 }
 
@@ -543,8 +543,9 @@ function sendAdminPage(res) {
           cache: 'no-store',
           credentials: 'same-origin'
         });
-        if (!response.ok) throw new Error('清空失败：HTTP ' + response.status);
-        renderStats(await response.json());
+        const data = await response.json();
+        if (!response.ok) throw new Error(data.error || ('清空失败：HTTP ' + response.status));
+        renderStats(data);
       } catch (error) {
         document.getElementById('meta').textContent = error.message;
       } finally {
@@ -593,7 +594,14 @@ module.exports = async (req, res) => {
 
         if (req.method === 'POST' && pathname === '/admin/clear') {
             res.setHeader('Cache-Control', 'no-store');
-            res.status(200).json(emptyStatsPayload(await clearStats()));
+            try {
+                res.status(200).json(emptyStatsPayload(await clearStats()));
+            } catch (error) {
+                console.error('Clear stats failed:', error);
+                res.status(500).json({
+                    error: error.message
+                });
+            }
             return;
         }
 
