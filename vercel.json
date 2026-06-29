@@ -9,10 +9,6 @@
     ],
     "rewrites": [
         {
-            "source": "/t/p/:path*",
-            "destination": "https://image.tmdb.org/t/p/:path*"
-        },
-        {
             "source": "/:path*",
             "destination": "/api/tmdb.js"
         }

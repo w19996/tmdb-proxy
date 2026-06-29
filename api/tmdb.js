@@ -1,6 +1,7 @@
 const axios = require('axios');
 
 const TMDB_BASE_URL = 'https://api.themoviedb.org';
+const TMDB_IMAGE_BASE_URL = 'https://image.tmdb.org';
 const CACHE_DURATION = 10 * 60 * 1000;
 const MAX_CACHE_SIZE = 1000;
 const MAX_CALL_LOGS = 500;
@@ -84,6 +85,10 @@ function isAdminRoute(pathname) {
 
 function isIgnoredRoute(pathname) {
     return pathname === '/favicon.ico';
+}
+
+function isImageRoute(pathname) {
+    return pathname.startsWith('/t/p/');
 }
 
 function timingSafeEqualString(left, right) {
@@ -396,6 +401,7 @@ module.exports = async (req, res) => {
     try {
         const authHeader = req.headers.authorization;
         const cacheKey = fullPath;
+        const imageRequest = isImageRoute(pathname);
 
         if (cache.has(cacheKey)) {
             const cachedData = cache.get(cacheKey);
@@ -411,14 +417,21 @@ module.exports = async (req, res) => {
                     cacheHit,
                     durationMs: Date.now() - startedAt
                 });
+                if (imageRequest) {
+                    if (cachedData.contentType) {
+                        res.setHeader('Content-Type', cachedData.contentType);
+                    }
+                    return res.status(200).send(Buffer.from(cachedData.data));
+                }
+
                 return res.status(200).json(cachedData.data);
             }
 
             cache.delete(cacheKey);
         }
 
-        const tmdbUrl = `${TMDB_BASE_URL}${fullPath}`;
-        const config = {};
+        const tmdbUrl = `${imageRequest ? TMDB_IMAGE_BASE_URL : TMDB_BASE_URL}${fullPath}`;
+        const config = imageRequest ? { responseType: 'arraybuffer' } : {};
 
         if (authHeader) {
             config.headers = {
@@ -434,6 +447,7 @@ module.exports = async (req, res) => {
 
             cache.set(cacheKey, {
                 data: response.data,
+                contentType: response.headers['content-type'],
                 expiry: Date.now() + CACHE_DURATION
             });
             console.log('Cache miss and stored:', fullPath);
@@ -449,6 +463,13 @@ module.exports = async (req, res) => {
             cacheHit,
             durationMs: Date.now() - startedAt
         });
+
+        if (imageRequest) {
+            if (response.headers['content-type']) {
+                res.setHeader('Content-Type', response.headers['content-type']);
+            }
+            return res.status(response.status).send(Buffer.from(response.data));
+        }
 
         res.status(response.status).json(response.data);
     } catch (error) {
