@@ -173,6 +173,19 @@ async function clearStats() {
     return 'memory';
 }
 
+function emptyStatsPayload(storageMode) {
+    return {
+        date: getTodayKey(),
+        timeZone: STATS_TIME_ZONE,
+        storageMode,
+        total: 0,
+        retainedLogs: 0,
+        maxLogs: MAX_CALL_LOGS,
+        byPath: [],
+        calls: []
+    };
+}
+
 async function getKvStatsPayload() {
     const date = getTodayKey();
     const keys = getStatsKeys(date);
@@ -462,10 +475,7 @@ function sendAdminPage(res) {
         '</tbody></table>';
     }
 
-    async function loadStats() {
-      const response = await fetch('/admin/data?_=' + Date.now(), { cache: 'no-store' });
-      const data = await response.json();
-
+    function renderStats(data) {
       document.getElementById('meta').textContent =
         '日期 ' + data.date + ' · 时区 ' + data.timeZone + ' · 最多保留最近 ' + data.maxLogs + ' 条调用内容';
       document.getElementById('total').textContent = data.total;
@@ -495,12 +505,17 @@ function sendAdminPage(res) {
       );
     }
 
+    async function loadStats() {
+      const response = await fetch('/admin/data?_=' + Date.now(), { cache: 'no-store' });
+      renderStats(await response.json());
+    }
+
     document.getElementById('refresh').addEventListener('click', loadStats);
     document.getElementById('clear').addEventListener('click', async () => {
       if (!confirm('清空今天的统计？')) return;
       const response = await fetch('/admin/clear', { method: 'POST', cache: 'no-store' });
       if (!response.ok) throw new Error('清空失败');
-      await loadStats();
+      renderStats(await response.json());
     });
     loadStats().catch((error) => {
       document.getElementById('meta').textContent = '加载失败：' + error.message;
@@ -544,10 +559,7 @@ module.exports = async (req, res) => {
 
         if (req.method === 'POST' && pathname === '/admin/clear') {
             res.setHeader('Cache-Control', 'no-store');
-            res.status(200).json({
-                ok: true,
-                storageMode: await clearStats()
-            });
+            res.status(200).json(emptyStatsPayload(await clearStats()));
             return;
         }
 

@@ -132,6 +132,8 @@ async function request(url, method = 'GET') {
     assert.strictEqual(stats.body.byPath[0].path, '/t/p/w500/a.jpg');
     assert.strictEqual(stats.body.byPath[0].count, 2);
     assert.strictEqual(clear.body.storageMode, 'kv');
+    assert.strictEqual(clear.body.total, 0);
+    assert.deepStrictEqual(clear.body.calls, []);
     assert.strictEqual(clearedStats.body.total, 0);
     assert.deepStrictEqual(clearedStats.body.byPath, []);
 
