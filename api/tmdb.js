@@ -6,6 +6,10 @@ const CACHE_DURATION = 10 * 60 * 1000;
 const MAX_CACHE_SIZE = 1000;
 const MAX_CALL_LOGS = 500;
 const STATS_TIME_ZONE = process.env.STATS_TIME_ZONE || 'Asia/Shanghai';
+const STATS_KEY_PREFIX = process.env.STATS_KEY_PREFIX || 'tmdb-proxy:stats';
+const STATS_TTL_SECONDS = 3 * 24 * 60 * 60;
+const KV_REST_API_URL = process.env.KV_REST_API_URL || process.env.UPSTASH_REDIS_REST_URL || '';
+const KV_REST_API_TOKEN = process.env.KV_REST_API_TOKEN || process.env.UPSTASH_REDIS_REST_TOKEN || '';
 const ADMIN_USER = process.env.ADMIN_USER || 'admin';
 const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || '';
 
@@ -43,7 +47,7 @@ function getOrCreateTodayStats() {
     return dailyStats.get(today);
 }
 
-function recordApiCall(entry) {
+function recordMemoryApiCall(entry) {
     const stats = getOrCreateTodayStats();
     const pathStats = stats.byPath.get(entry.path) || {
         path: entry.path,
@@ -64,12 +68,139 @@ function recordApiCall(entry) {
     }
 }
 
-function getStatsPayload() {
+function hasKvStats() {
+    return Boolean(KV_REST_API_URL && KV_REST_API_TOKEN);
+}
+
+function getStatsKeys(date) {
+    const prefix = `${STATS_KEY_PREFIX}:${date}`;
+
+    return {
+        total: `${prefix}:total`,
+        pathCounts: `${prefix}:pathCounts`,
+        pathLastStatus: `${prefix}:pathLastStatus`,
+        pathLastCalledAt: `${prefix}:pathLastCalledAt`,
+        calls: `${prefix}:calls`
+    };
+}
+
+async function kvPipeline(commands) {
+    const response = await axios.post(
+        `${KV_REST_API_URL.replace(/\/$/, '')}/pipeline`,
+        commands,
+        {
+            headers: {
+                Authorization: `Bearer ${KV_REST_API_TOKEN}`,
+                'Content-Type': 'application/json'
+            }
+        }
+    );
+
+    for (const item of response.data) {
+        if (item.error) {
+            throw new Error(item.error);
+        }
+    }
+
+    return response.data.map((item) => item.result);
+}
+
+function hashToObject(value) {
+    if (!value) {
+        return {};
+    }
+
+    if (!Array.isArray(value)) {
+        return value;
+    }
+
+    const result = {};
+    for (let index = 0; index < value.length; index += 2) {
+        result[value[index]] = value[index + 1];
+    }
+
+    return result;
+}
+
+async function recordKvApiCall(entry) {
+    const keys = getStatsKeys(getTodayKey());
+    const call = JSON.stringify(entry);
+    const keysToExpire = Object.values(keys);
+
+    await kvPipeline([
+        ['INCR', keys.total],
+        ['HINCRBY', keys.pathCounts, entry.path, 1],
+        ['HSET', keys.pathLastStatus, entry.path, String(entry.status)],
+        ['HSET', keys.pathLastCalledAt, entry.path, entry.calledAt],
+        ['LPUSH', keys.calls, call],
+        ['LTRIM', keys.calls, 0, MAX_CALL_LOGS - 1],
+        ...keysToExpire.map((key) => ['EXPIRE', key, STATS_TTL_SECONDS])
+    ]);
+}
+
+async function recordApiCall(entry) {
+    if (!hasKvStats()) {
+        recordMemoryApiCall(entry);
+        return;
+    }
+
+    try {
+        await recordKvApiCall(entry);
+    } catch (error) {
+        console.error('KV stats write failed:', error);
+        recordMemoryApiCall(entry);
+    }
+}
+
+async function getKvStatsPayload() {
+    const date = getTodayKey();
+    const keys = getStatsKeys(date);
+    const [total, pathCountsResult, lastStatusResult, lastCalledAtResult, callsResult] = await kvPipeline([
+        ['GET', keys.total],
+        ['HGETALL', keys.pathCounts],
+        ['HGETALL', keys.pathLastStatus],
+        ['HGETALL', keys.pathLastCalledAt],
+        ['LRANGE', keys.calls, 0, MAX_CALL_LOGS - 1]
+    ]);
+    const pathCounts = hashToObject(pathCountsResult);
+    const lastStatus = hashToObject(lastStatusResult);
+    const lastCalledAt = hashToObject(lastCalledAtResult);
+    const calls = (callsResult || []).map((item) => JSON.parse(item));
+
+    return {
+        date,
+        timeZone: STATS_TIME_ZONE,
+        storageMode: 'kv',
+        total: Number(total || 0),
+        retainedLogs: calls.length,
+        maxLogs: MAX_CALL_LOGS,
+        byPath: Object.entries(pathCounts)
+            .map(([path, count]) => ({
+                path,
+                count: Number(count || 0),
+                lastStatus: lastStatus[path] || null,
+                lastCalledAt: lastCalledAt[path] || null
+            }))
+            .sort((a, b) => b.count - a.count || a.path.localeCompare(b.path)),
+        calls
+    };
+}
+
+async function getStatsPayload() {
+    if (hasKvStats()) {
+        try {
+            return await getKvStatsPayload();
+        } catch (error) {
+            console.error('KV stats read failed:', error);
+        }
+    }
+
     const stats = getOrCreateTodayStats();
 
     return {
         date: stats.date,
         timeZone: stats.timeZone,
+        storageMode: 'memory',
         total: stats.total,
         retainedLogs: stats.calls.length,
         maxLogs: MAX_CALL_LOGS,
@@ -379,7 +510,7 @@ module.exports = async (req, res) => {
 
         if (req.method === 'GET' && pathname === '/admin/data') {
             res.setHeader('Cache-Control', 'no-store');
-            res.status(200).json(getStatsPayload());
+            res.status(200).json(await getStatsPayload());
             return;
         }
 
@@ -409,7 +540,7 @@ module.exports = async (req, res) => {
                 statusCode = 200;
                 cacheHit = true;
                 console.log('Cache hit:', fullPath);
-                recordApiCall({
+                await recordApiCall({
                     calledAt: new Date().toISOString(),
                     method: req.method,
                     path: fullPath,
@@ -455,7 +586,7 @@ module.exports = async (req, res) => {
             console.log('Response not cached due to non-200 status:', response.status);
         }
 
-        recordApiCall({
+        await recordApiCall({
             calledAt: new Date().toISOString(),
             method: req.method,
             path: fullPath,
@@ -476,7 +607,7 @@ module.exports = async (req, res) => {
         statusCode = error.response?.status || 500;
         console.error('TMDB API error:', error);
 
-        recordApiCall({
+        await recordApiCall({
             calledAt: new Date().toISOString(),
             method: req.method,
             path: fullPath,
