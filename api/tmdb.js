@@ -505,17 +505,51 @@ function sendAdminPage(res) {
       );
     }
 
+    function emptyStats() {
+      return {
+        date: new Intl.DateTimeFormat('en-CA', {
+          timeZone: '${STATS_TIME_ZONE}',
+          year: 'numeric',
+          month: '2-digit',
+          day: '2-digit'
+        }).format(new Date()),
+        timeZone: '${STATS_TIME_ZONE}',
+        storageMode: '',
+        total: 0,
+        retainedLogs: 0,
+        maxLogs: ${MAX_CALL_LOGS},
+        byPath: [],
+        calls: []
+      };
+    }
+
     async function loadStats() {
-      const response = await fetch('/admin/data?_=' + Date.now(), { cache: 'no-store' });
+      const response = await fetch('/admin/data?_=' + Date.now(), {
+        cache: 'no-store',
+        credentials: 'same-origin'
+      });
       renderStats(await response.json());
     }
 
     document.getElementById('refresh').addEventListener('click', loadStats);
     document.getElementById('clear').addEventListener('click', async () => {
       if (!confirm('清空今天的统计？')) return;
-      const response = await fetch('/admin/clear', { method: 'POST', cache: 'no-store' });
-      if (!response.ok) throw new Error('清空失败');
-      renderStats(await response.json());
+      const clearButton = document.getElementById('clear');
+      clearButton.disabled = true;
+      renderStats(emptyStats());
+      try {
+        const response = await fetch('/admin/clear?_=' + Date.now(), {
+          method: 'POST',
+          cache: 'no-store',
+          credentials: 'same-origin'
+        });
+        if (!response.ok) throw new Error('清空失败：HTTP ' + response.status);
+        renderStats(await response.json());
+      } catch (error) {
+        document.getElementById('meta').textContent = error.message;
+      } finally {
+        clearButton.disabled = false;
+      }
     });
     loadStats().catch((error) => {
       document.getElementById('meta').textContent = '加载失败：' + error.message;
