@@ -152,6 +152,27 @@ async function recordApiCall(entry) {
     }
 }
 
+function clearMemoryStats() {
+    dailyStats.delete(getTodayKey());
+}
+
+async function clearKvStats() {
+    await kvPipeline([
+        ['DEL', ...Object.values(getStatsKeys(getTodayKey()))]
+    ]);
+}
+
+async function clearStats() {
+    clearMemoryStats();
+
+    if (hasKvStats()) {
+        await clearKvStats();
+        return 'kv';
+    }
+
+    return 'memory';
+}
+
 async function getKvStatsPayload() {
     const date = getTodayKey();
     const keys = getStatsKeys(date);
@@ -211,7 +232,7 @@ async function getStatsPayload() {
 }
 
 function isAdminRoute(pathname) {
-    return pathname === '/admin' || pathname === '/admin/data';
+    return pathname === '/admin' || pathname === '/admin/data' || pathname === '/admin/clear';
 }
 
 function isIgnoredRoute(pathname) {
@@ -389,6 +410,7 @@ function sendAdminPage(res) {
     </div>
     <div class="toolbar">
       <button type="button" id="refresh">刷新</button>
+      <button type="button" id="clear">清空</button>
     </div>
   </header>
   <main>
@@ -474,6 +496,11 @@ function sendAdminPage(res) {
     }
 
     document.getElementById('refresh').addEventListener('click', loadStats);
+    document.getElementById('clear').addEventListener('click', async () => {
+      if (!confirm('清空今天的统计？')) return;
+      await fetch('/admin/clear', { method: 'POST', cache: 'no-store' });
+      await loadStats();
+    });
     loadStats().catch((error) => {
       document.getElementById('meta').textContent = '加载失败：' + error.message;
     });
@@ -511,6 +538,15 @@ module.exports = async (req, res) => {
         if (req.method === 'GET' && pathname === '/admin/data') {
             res.setHeader('Cache-Control', 'no-store');
             res.status(200).json(await getStatsPayload());
+            return;
+        }
+
+        if (req.method === 'POST' && pathname === '/admin/clear') {
+            res.setHeader('Cache-Control', 'no-store');
+            res.status(200).json({
+                ok: true,
+                storageMode: await clearStats()
+            });
             return;
         }
 

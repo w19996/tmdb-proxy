@@ -33,6 +33,13 @@ function runRedis(command) {
             return redis.strings.get(key);
         case 'GET':
             return redis.strings.get(key) || null;
+        case 'DEL':
+            for (const redisKey of command.slice(1)) {
+                redis.strings.delete(redisKey);
+                redis.hashes.delete(redisKey);
+                redis.lists.delete(redisKey);
+            }
+            return command.length - 1;
         case 'HINCRBY': {
             const entry = hash(key);
             entry.set(first, String(Number(entry.get(first) || 0) + Number(second)));
@@ -101,9 +108,9 @@ function makeRes() {
     };
 }
 
-async function request(url) {
+async function request(url, method = 'GET') {
     const response = makeRes();
-    await handler({ method: 'GET', url, headers: {} }, response);
+    await handler({ method, url, headers: {} }, response);
     return response;
 }
 
@@ -111,9 +118,12 @@ async function request(url) {
     const firstImage = await request('/t/p/w500/a.jpg');
     const cachedImage = await request('/t/p/w500/a.jpg');
     const stats = await request('/admin/data');
+    const clear = await request('/admin/clear', 'POST');
+    const clearedStats = await request('/admin/data');
 
     assert.strictEqual(firstImage.statusCode, 200);
     assert.strictEqual(cachedImage.statusCode, 200);
+    assert.strictEqual(clear.statusCode, 200);
     assert.strictEqual(firstImage.headers['Content-Type'], 'image/jpeg');
     assert.deepStrictEqual([...cachedImage.body], [1, 2, 3]);
     assert.strictEqual(upstreamGets, 1);
@@ -121,6 +131,9 @@ async function request(url) {
     assert.strictEqual(stats.body.total, 2);
     assert.strictEqual(stats.body.byPath[0].path, '/t/p/w500/a.jpg');
     assert.strictEqual(stats.body.byPath[0].count, 2);
+    assert.strictEqual(clear.body.storageMode, 'kv');
+    assert.strictEqual(clearedStats.body.total, 0);
+    assert.deepStrictEqual(clearedStats.body.byPath, []);
 
     console.log('tmdb proxy kv stats ok');
     process.exit(0);
