@@ -463,7 +463,7 @@ function sendAdminPage(res) {
     }
 
     async function loadStats() {
-      const response = await fetch('/admin/data', { cache: 'no-store' });
+      const response = await fetch('/admin/data?_=' + Date.now(), { cache: 'no-store' });
       const data = await response.json();
 
       document.getElementById('meta').textContent =
@@ -498,7 +498,8 @@ function sendAdminPage(res) {
     document.getElementById('refresh').addEventListener('click', loadStats);
     document.getElementById('clear').addEventListener('click', async () => {
       if (!confirm('清空今天的统计？')) return;
-      await fetch('/admin/clear', { method: 'POST', cache: 'no-store' });
+      const response = await fetch('/admin/clear', { method: 'POST', cache: 'no-store' });
+      if (!response.ok) throw new Error('清空失败');
       await loadStats();
     });
     loadStats().catch((error) => {
