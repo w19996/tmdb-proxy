@@ -1,7 +1,7 @@
 const assert = require('assert');
 const Module = require('module');
 
-process.env.KV_REST_API_URL = 'https://example.upstash.io';
+process.env.KV_REST_API_URL = ' "https://example.upstash.io/pipeline" ';
 process.env.KV_REST_API_TOKEN = 'token';
 
 const redis = {
@@ -128,10 +128,12 @@ async function request(url, method = 'GET') {
     assert.deepStrictEqual([...cachedImage.body], [1, 2, 3]);
     assert.strictEqual(upstreamGets, 1);
     assert.strictEqual(stats.body.storageMode, 'kv');
+    assert.strictEqual(stats.body.kv.urlHost, 'example.upstash.io');
     assert.strictEqual(stats.body.total, 2);
     assert.strictEqual(stats.body.byPath[0].path, '/t/p/w500/a.jpg');
     assert.strictEqual(stats.body.byPath[0].count, 2);
     assert.strictEqual(clear.body.storageMode, 'kv');
+    assert.strictEqual(clear.body.kv.urlHost, 'example.upstash.io');
     assert.strictEqual(clear.body.total, 0);
     assert.deepStrictEqual(clear.body.calls, []);
     assert.strictEqual(clearedStats.body.total, 0);

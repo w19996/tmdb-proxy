@@ -8,13 +8,17 @@ const MAX_CALL_LOGS = 500;
 const STATS_TIME_ZONE = process.env.STATS_TIME_ZONE || 'Asia/Shanghai';
 const STATS_KEY_PREFIX = process.env.STATS_KEY_PREFIX || 'tmdb-proxy:stats';
 const STATS_TTL_SECONDS = 3 * 24 * 60 * 60;
-const KV_REST_API_URL = process.env.KV_REST_API_URL || process.env.UPSTASH_REDIS_REST_URL || '';
-const KV_REST_API_TOKEN = process.env.KV_REST_API_TOKEN || process.env.UPSTASH_REDIS_REST_TOKEN || '';
+const KV_REST_API_URL = cleanEnvValue(process.env.KV_REST_API_URL || process.env.UPSTASH_REDIS_REST_URL || '');
+const KV_REST_API_TOKEN = cleanEnvValue(process.env.KV_REST_API_TOKEN || process.env.UPSTASH_REDIS_REST_TOKEN || '');
 const ADMIN_USER = process.env.ADMIN_USER || 'admin';
 const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || '';
 
 const cache = new Map();
 const dailyStats = new Map();
+
+function cleanEnvValue(value) {
+    return String(value || '').trim().replace(/^['"]|['"]$/g, '');
+}
 
 function getTodayKey() {
     return new Intl.DateTimeFormat('en-CA', {
@@ -72,6 +76,50 @@ function hasKvStats() {
     return Boolean(KV_REST_API_URL && KV_REST_API_TOKEN);
 }
 
+function getKvRestBaseUrl() {
+    let url;
+
+    try {
+        url = new URL(KV_REST_API_URL);
+    } catch {
+        throw new Error('KV_REST_API_URL must be an Upstash REST URL like https://xxx.upstash.io');
+    }
+
+    if (url.protocol !== 'https:' && url.protocol !== 'http:') {
+        throw new Error('KV_REST_API_URL must start with https://, not redis://');
+    }
+
+    return `${url.origin}${url.pathname}`
+        .replace(/\/pipeline\/?$/, '')
+        .replace(/\/$/, '');
+}
+
+function getKvConfigStatus() {
+    if (!KV_REST_API_URL && !KV_REST_API_TOKEN) {
+        return { configured: false };
+    }
+
+    if (!KV_REST_API_URL || !KV_REST_API_TOKEN) {
+        return {
+            configured: false,
+            error: 'KV_REST_API_URL and KV_REST_API_TOKEN must both be set'
+        };
+    }
+
+    try {
+        const baseUrl = getKvRestBaseUrl();
+        return {
+            configured: true,
+            urlHost: new URL(baseUrl).host
+        };
+    } catch (error) {
+        return {
+            configured: false,
+            error: error.message
+        };
+    }
+}
+
 function getStatsKeys(date) {
     const prefix = `${STATS_KEY_PREFIX}:${date}`;
 
@@ -86,7 +134,7 @@ function getStatsKeys(date) {
 
 async function kvPipeline(commands) {
     const response = await axios.post(
-        `${KV_REST_API_URL.replace(/\/$/, '')}/pipeline`,
+        `${getKvRestBaseUrl()}/pipeline`,
         commands,
         {
             headers: {
@@ -166,18 +214,28 @@ async function clearStats() {
     clearMemoryStats();
 
     if (hasKvStats()) {
-        await clearKvStats();
-        return 'kv';
+        try {
+            await clearKvStats();
+            return { storageMode: 'kv' };
+        } catch (error) {
+            console.error('KV stats clear failed:', error);
+            return {
+                storageMode: 'memory',
+                kvError: error.message
+            };
+        }
     }
 
-    return 'memory';
+    return { storageMode: 'memory' };
 }
 
-function emptyStatsPayload(storageMode) {
+function emptyStatsPayload(clearResult) {
     return {
         date: getTodayKey(),
         timeZone: STATS_TIME_ZONE,
-        storageMode,
+        storageMode: clearResult.storageMode,
+        kv: getKvConfigStatus(),
+        kvError: clearResult.kvError,
         total: 0,
         retainedLogs: 0,
         maxLogs: MAX_CALL_LOGS,
@@ -205,6 +263,7 @@ async function getKvStatsPayload() {
         date,
         timeZone: STATS_TIME_ZONE,
         storageMode: 'kv',
+        kv: getKvConfigStatus(),
         total: Number(total || 0),
         retainedLogs: calls.length,
         maxLogs: MAX_CALL_LOGS,
@@ -235,6 +294,7 @@ async function getStatsPayload() {
         date: stats.date,
         timeZone: stats.timeZone,
         storageMode: 'memory',
+        kv: getKvConfigStatus(),
         total: stats.total,
         retainedLogs: stats.calls.length,
         maxLogs: MAX_CALL_LOGS,
@@ -476,8 +536,10 @@ function sendAdminPage(res) {
     }
 
     function renderStats(data) {
+      const kvStatus = data.kvError || (data.kv && data.kv.error);
       document.getElementById('meta').textContent =
-        '日期 ' + data.date + ' · 时区 ' + data.timeZone + ' · 最多保留最近 ' + data.maxLogs + ' 条调用内容';
+        '日期 ' + data.date + ' · 时区 ' + data.timeZone + ' · 最多保留最近 ' + data.maxLogs + ' 条调用内容' +
+        (kvStatus ? ' · KV错误：' + kvStatus : '');
       document.getElementById('total').textContent = data.total;
       document.getElementById('paths').textContent = data.byPath.length;
       document.getElementById('logs').textContent = data.retainedLogs;
@@ -515,6 +577,7 @@ function sendAdminPage(res) {
         }).format(new Date()),
         timeZone: '${STATS_TIME_ZONE}',
         storageMode: '',
+        kv: {},
         total: 0,
         retainedLogs: 0,
         maxLogs: ${MAX_CALL_LOGS},
